@@ -6,7 +6,8 @@
 INTERACTIVE=True
 ASK_TO_REBOOT=0
 BLACKLIST=/etc/modprobe.d/raspi-blacklist.conf
-CONFIG=/boot/config.txt
+
+
 
 USER=${SUDO_USER:-$(who -m | awk '{ print $1 }')}
 
@@ -19,11 +20,35 @@ is_pi () {
   fi
 }
 
-if is_pi ; then
-  CMDLINE=/boot/cmdline.txt
-else
-  CMDLINE=/proc/cmdline
-fi
+# TODO: This could be expanded for all distro/arch
+is_ubuntu () {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+  fi
+  if [ "$NAME" = "Ubuntu" ] ; then 
+    return 0
+  else
+    return 1
+  fi
+}
+
+setup_sysvars() {
+# If BOOT is unset (and not just empty), assume /boot:
+  if [ -z ${BOOT+set} ] ; then
+    BOOT=/boot
+  fi
+  if is_ubuntu ; then
+    PI_FIRMWARE=${BOOT}/firmware
+  else
+    PI_FIRMWARE=${BOOT}
+  fi
+  CONFIG=${PI_FIRMWARE}/config.txt
+  if is_pi ; then
+    CMDLINE=${PI_FIRMWARE}/cmdline.txt
+  else
+    CMDLINE=/proc/cmdline
+  fi
+}
 
 is_pione() {
    if grep -q "^Revision\s*:\s*00[0-9a-fA-F][0-9a-fA-F]$" /proc/cpuinfo; then
@@ -601,9 +626,9 @@ No other symbols, punctuation characters, or blank spaces are permitted.\
 }
 
 do_memory_split() { # Memory Split
-  if [ -e /boot/start_cd.elf ]; then
+  if [ -e ${PI_FIRMWARE}/start_cd.elf ]; then
     # New-style memory split setting
-    ## get current memory split from /boot/config.txt
+    ## get current memory split from ${PI_FIRMWARE}/config.txt
     arm=$(vcgencmd get_mem arm | cut -d '=' -f 2 | cut -d 'M' -f 1)
     gpu=$(vcgencmd get_mem gpu | cut -d '=' -f 2 | cut -d 'M' -f 1)
     tot=$(($arm+$gpu))
@@ -657,7 +682,7 @@ get_current_memory_split() {
   AVAILABLE_SPLITS="128 192 224 240"
   MEMSPLIT_DESCRIPTION=""
   for SPLIT in $AVAILABLE_SPLITS;do
-    if [ -e /boot/arm${SPLIT}_start.elf ] && cmp /boot/arm${SPLIT}_start.elf /boot/start.elf >/dev/null 2>&1;then
+    if [ -e ${PI_FIRMWARE}/arm${SPLIT}_start.elf ] && cmp ${PI_FIRMWARE}/arm${SPLIT}_start.elf ${PI_FIRMWARE}/start.elf >/dev/null 2>&1;then
       CURRENT_MEMSPLIT=$SPLIT
       MEMSPLIT_DESCRIPTION="Current: ${CURRENT_MEMSPLIT}MiB for ARM, $((256 - $CURRENT_MEMSPLIT))MiB for VideoCore"
       break
@@ -666,7 +691,7 @@ get_current_memory_split() {
 }
 
 set_memory_split() {
-  cp -a /boot/arm${1}_start.elf /boot/start.elf
+  cp -a ${PI_FIRMWARE}/arm${1}_start.elf ${PI_FIRMWARE}/start.elf
   sync
 }
 
@@ -1402,7 +1427,7 @@ get_camera() {
 }
 
 do_camera() {
-  if [ ! -e /boot/start_x.elf ]; then
+  if [ ! -e ${PI_FIRMWARE}/start_x.elf ]; then
     whiptail --msgbox "Your firmware appears to be out of date (no start_x.elf). Please update" 20 60 2
     return 1
   fi
@@ -1485,7 +1510,7 @@ do_onewire() {
 }
 
 do_gldriver() {
-  if [ ! -e /boot/overlays/vc4-kms-v3d.dtbo ]; then
+  if [ ! -e ${PI_FIRMWARE}/overlays/vc4-kms-v3d.dtbo ]; then
     whiptail --msgbox "Driver and kernel not present on your system. Please update" 20 60 2
     return 1
   fi
@@ -1904,10 +1929,10 @@ get_json_string_val() {
 
 # TODO: This is probably broken
 do_apply_os_config() {
-  [ -e /boot/os_config.json ] || return 0
-  NOOBSFLAVOUR=$(get_json_string_val /boot/os_config.json flavour)
-  NOOBSLANGUAGE=$(get_json_string_val /boot/os_config.json language)
-  NOOBSKEYBOARD=$(get_json_string_val /boot/os_config.json keyboard)
+  [ -e ${PI_FIRMWARE}/os_config.json ] || return 0
+  NOOBSFLAVOUR=$(get_json_string_val ${PI_FIRMWARE}/os_config.json flavour)
+  NOOBSLANGUAGE=$(get_json_string_val ${PI_FIRMWARE}/os_config.json language)
+  NOOBSKEYBOARD=$(get_json_string_val ${PI_FIRMWARE}/os_config.json keyboard)
 
   if [ -n "$NOOBSFLAVOUR" ]; then
     printf "Setting flavour to %s based on os_config.json from NOOBS. May take a while\n" "$NOOBSFLAVOUR"
@@ -1974,15 +1999,15 @@ get_overlay_now() {
 }
 
 get_overlay_conf() {
-  grep -q "boot=overlay" /boot/cmdline.txt
+  grep -q "boot=overlay" ${PI_FIRMWARE}/cmdline.txt
 }
 
 get_bootro_now() {
- findmnt /boot | grep -q " ro,"
+ findmnt ${BOOT} | grep -q " ro,"
 }
 
 get_bootro_conf() {
-  grep /boot /etc/fstab | grep -q "defaults.*,ro "
+  grep ${BOOT} /etc/fstab | grep -q "defaults.*,ro "
 }
 
 is_uname_current() {
@@ -1996,7 +2021,7 @@ enable_overlayfs() {
 
   # mount the boot partition as writable if it isn't already
   if get_bootro_now ; then
-    if ! mount -o remount,rw /boot 2>/dev/null ; then
+    if ! mount -o remount,rw ${BOOT} 2>/dev/null ; then
       echo "Unable to mount boot partition as writable - cannot enable"
       return 1
     fi
@@ -2069,21 +2094,21 @@ EOF
   update-initramfs -c -k "$KERN"
 
   # rename it so we know it has overlay added
-  mv /boot/initrd.img-"$KERN" /boot/"$INITRD"
+  mv ${BOOT}/initrd.img-"$KERN" ${BOOT}/"$INITRD"
 
   # there is now a modified initramfs ready for use...
 
   # modify config.txt
-  sed -i /boot/config.txt -e "/initramfs.*/d" 
-  echo initramfs "$INITRD" >> /boot/config.txt
+  sed -i ${PI_FIRMWARE}/config.txt -e "/initramfs.*/d" 
+  echo initramfs "$INITRD" >> ${PI_FIRMWARE}/config.txt
 
   # modify command line
-  if ! grep -q "boot=overlay" /boot/cmdline.txt ; then
-      sed -i /boot/cmdline.txt -e "s/^/boot=overlay /"
+  if ! grep -q "boot=overlay" ${PI_FIRMWARE}/cmdline.txt ; then
+      sed -i ${PI_FIRMWARE}/cmdline.txt -e "s/^${PI_FIRMWARE}=overlay /"
   fi
 
   if [ "$BOOTRO" = "yes" ] ; then
-    if ! mount -o remount,ro /boot 2>/dev/null ; then
+    if ! mount -o remount,ro ${BOOT} 2>/dev/null ; then
         echo "Unable to remount boot partition as read-only"
     fi
   fi
@@ -2093,7 +2118,7 @@ disable_overlayfs() {
   KERN=$(uname -r)
   # mount the boot partition as writable if it isn't already
   if get_bootro_now ; then
-    if ! mount -o remount,rw /boot 2>/dev/null ; then
+    if ! mount -o remount,rw ${BOOT} 2>/dev/null ; then
       echo "Unable to mount boot partition as writable - cannot disable"
       return 1
     fi
@@ -2103,14 +2128,14 @@ disable_overlayfs() {
   fi
 
   # modify config.txt
-  sed -i /boot/config.txt -e "/initramfs.*/d"
+  sed -i ${PI_FIRMWARE}/config.txt -e "/initramfs.*/d"
   update-initramfs -d -k "${KERN}-overlay"
 
   # modify command line
-  sed -i /boot/cmdline.txt -e "s/\(.*\)boot=overlay \(.*\)/\1\2/"
+  sed -i ${PI_FIRMWARE}/cmdline.txt -e "s/\(.*\)boot=overlay \(.*\)/\1\2/"
 
   if [ "$BOOTRO" = "yes" ] ; then
-    if ! mount -o remount,ro /boot 2>/dev/null ; then
+    if ! mount -o remount,ro ${BOOT} 2>/dev/null ; then
         echo "Unable to remount boot partition as read-only"
     fi
   fi
@@ -2121,7 +2146,7 @@ enable_bootro() {
     echo "Overlay in use; cannot update fstab"
     return 1
   fi
-  sed -i /etc/fstab -e "s/\(.*\/boot.*\)defaults\(.*\)/\1defaults,ro\2/"
+  sed -i /etc/fstab -e "s/\(.*\${BOOT}.*\)defaults\(.*\)/\1defaults,ro\2/"
 }
 
 disable_bootro() {
@@ -2129,7 +2154,7 @@ disable_bootro() {
     echo "Overlay in use; cannot update fstab"
     return 1
   fi
-  sed -i /etc/fstab -e "s/\(.*\/boot.*\)defaults,ro\(.*\)/\1defaults\2/"
+  sed -i /etc/fstab -e "s/\(.*\${BOOT}.*\)defaults,ro\(.*\)/\1defaults\2/"
 }
 
 do_overlayfs() {
@@ -2514,13 +2539,16 @@ do_proxy_menu() {
 # Interactive use loop
 #
 if [ "$INTERACTIVE" = True ]; then
-  [ -e $CONFIG ] || touch $CONFIG
   calc_wt_size
   while [ "$USER" = "root" ] || [ -z "$USER" ]; do
     if ! USER=$(whiptail --inputbox "raspi-config could not determine the default user.\\n\\nWhat user should these settings apply to?" 20 60 pi 3>&1 1>&2 2>&3); then
       return 0
     fi
   done
+  # setup_sysvars() sets up the CONFIG (and other) variable to the correct
+  # locations for the platform.
+  setup_sysvars 
+  [ -e $CONFIG ] || touch $CONFIG
   while true; do
     if is_pi ; then
       FUN=$(whiptail --title "Raspberry Pi Software Configuration Tool (raspi-config)" --backtitle "$(cat /proc/device-tree/model)" --menu "Setup Options" $WT_HEIGHT $WT_WIDTH $WT_MENU_HEIGHT --cancel-button Finish --ok-button Select \
